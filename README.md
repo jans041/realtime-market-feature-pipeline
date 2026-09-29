@@ -2,7 +2,7 @@
 
 Streaming market events through Kafka and PySpark Structured Streaming into a Feast feature store (Redis online, Iceberg offline), with Great Expectations data contracts and GitHub Actions CI.
 
-> Status: Phase 1 — local infrastructure and repo tooling.
+> Status: Phase 1 — ingestion (Coinbase WebSocket -> Kafka, Avro + Schema Registry, DLQ).
 
 ## Repository layout
 
@@ -43,6 +43,40 @@ docker compose ps
 | Console UI      | `http://localhost:8080` |
 
 Topics created on startup: `market.trades.raw`, `market.trades.dlq`, `market.features.1m`.
+
+## Ingestion: trade producer
+
+`src/pipeline/ingestion/producer.py` subscribes to the public Coinbase Advanced Trade
+`market_trades` channel and produces each trade to Kafka.
+
+```bash
+python -m pipeline.ingestion.register_schema   # once, and after any schema change
+python -m pipeline.ingestion.producer          # Ctrl+C to stop (flushes pending messages)
+```
+
+| Output | Format | Key | Contents |
+|---|---|---|---|
+| `market.trades.raw` | Avro, `schemas/trade.avsc` | symbol, e.g. `BTC-USD` | validated trades |
+| `market.trades.dlq` | JSON envelope | none | rejected payload + `error_type`, `error_message`, `source`, `failed_at` |
+
+Design notes:
+
+- **Explicit schema registration.** The producer runs with `auto.register.schemas=false` and
+  checks at startup that `trade.avsc` is registered, so schema changes go through review,
+  not a deploy. The registry enforces `BACKWARD` compatibility.
+- **Keyed by symbol** so all trades for a symbol land on one partition, in order.
+- **Durable, ordered delivery:** `acks=all` + `enable.idempotence=true`; `linger.ms=20` and
+  `lz4` compression for batching.
+- **Per-trade validation.** A Coinbase message can carry several trades; each is validated
+  on its own, so one bad trade goes to the DLQ without dropping its neighbours.
+- **Reconnects** use exponential backoff with full jitter (1s base, 60s cap) and re-subscribe
+  on every connection. Subscribe snapshots (the last ~50 trades) are skipped by default
+  (`INCLUDE_SNAPSHOTS=false`) so a reconnect doesn't replay old trades as late events.
+- **Two timestamps:** `event_time` (exchange) drives streaming windows; `ingest_time`
+  (producer) makes ingestion lag measurable. Keep the host clock NTP-synced, or the lag
+  is meaningless.
+
+Configuration is via environment variables (see `.env.example`).
 
 ## Contributing
 
