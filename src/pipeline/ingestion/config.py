@@ -28,8 +28,12 @@ class ProducerSettings(BaseSettings):
     kafka_topic_raw: str = "market.trades.raw"
     kafka_topic_dlq: str = "market.trades.dlq"
 
-    market_ws_url: str
-    exchange: str = "binance_us"
+    market_ws_url: str = "wss://advanced-trade-ws.coinbase.com"
+    # Comma-separated Coinbase product ids, e.g. "BTC-USD,ETH-USD".
+    market_product_ids: str = "BTC-USD,ETH-USD"
+    # Coinbase re-sends the last ~50 trades on every subscribe; see coinbase.parse_message.
+    include_snapshots: bool = False
+    exchange: str = "coinbase"
     trade_schema_path: Path = REPO_ROOT / "schemas" / "trade.avsc"
 
     reconnect_base_seconds: PositiveFloat = 1.0
@@ -38,6 +42,10 @@ class ProducerSettings(BaseSettings):
     flush_timeout_seconds: PositiveFloat = 10.0
 
     log_level: str = Field(default="INFO", pattern="^(DEBUG|INFO|WARNING|ERROR)$")
+
+    @property
+    def product_ids(self) -> list[str]:
+        return [p.strip().upper() for p in self.market_product_ids.split(",") if p.strip()]
 
     @property
     def trade_value_subject(self) -> str:

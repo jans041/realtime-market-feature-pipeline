@@ -57,7 +57,7 @@ def register(settings: ProducerSettings) -> int:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)  # Schema Registry client request logs
-    settings = ProducerSettings()  # type: ignore[call-arg]  # required fields come from env
+    settings = ProducerSettings()
     try:
         register(settings)
     except SchemaRegistryError as exc:

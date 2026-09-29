@@ -1,6 +1,6 @@
 """WebSocket -> Kafka trade producer.
 
-Reads trade events from an exchange WebSocket, validates them, and produces:
+Reads trades from the Coinbase Advanced Trade WebSocket, validates them, and produces:
   - valid trades as Avro to ``KAFKA_TOPIC_RAW`` (keyed by symbol, so per-symbol order is kept)
   - anything that can't be parsed or serialized as JSON to ``KAFKA_TOPIC_DLQ``
 
@@ -10,6 +10,7 @@ Run:  python -m pipeline.ingestion.producer
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Callable
@@ -23,9 +24,10 @@ from confluent_kafka.schema_registry.avro import AvroSerializer
 from confluent_kafka.serialization import MessageField, SerializationContext
 
 from pipeline.ingestion.backoff import ExponentialBackoff
+from pipeline.ingestion.coinbase import CoinbaseSourceError, parse_message, subscribe_messages
 from pipeline.ingestion.config import ProducerSettings
 from pipeline.ingestion.dlq import build_dlq_record
-from pipeline.ingestion.models import TradeParseError, parse_trade
+from pipeline.ingestion.models import Trade, TradeParseError
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +54,12 @@ class KafkaProducerLike(Protocol):
 
 @dataclass
 class ProducerStats:
-    received: int = 0
-    delivered: int = 0
+    messages: int = 0  # WebSocket messages, including heartbeats
+    trades: int = 0  # valid trades handed to Kafka
+    delivered: int = 0  # broker-acknowledged, raw + DLQ
     delivery_failed: int = 0
     dead_lettered: int = 0
+    source_errors: int = 0
 
 
 def now_ms() -> int:
@@ -82,20 +86,39 @@ class TradeRouter:
         self.stats = ProducerStats()
 
     def handle(self, raw: str | bytes) -> None:
-        self.stats.received += 1
+        self.stats.messages += 1
         received_at = self._clock_ms()
 
         try:
-            trade = parse_trade(raw, exchange=self._settings.exchange, ingest_time_ms=received_at)
+            parsed = parse_message(
+                raw,
+                exchange=self._settings.exchange,
+                ingest_time_ms=received_at,
+                include_snapshots=self._settings.include_snapshots,
+            )
         except TradeParseError as exc:
             self._dead_letter(raw, exc.error_type, str(exc), received_at)
             return
+        except CoinbaseSourceError as exc:
+            self.stats.source_errors += 1
+            logger.error("Coinbase reported an error: %s", exc)
+            return
 
+        for rejected in parsed.rejected:
+            self._dead_letter(
+                rejected.raw, rejected.error_type, rejected.error_message, received_at
+            )
+        for trade in parsed.trades:
+            self._produce_trade(trade, received_at)
+
+    def _produce_trade(self, trade: Trade, received_at: int) -> None:
+        self.stats.trades += 1
+        record = trade.to_avro_dict()
         try:
-            value = self._serialize(trade.to_avro_dict())
+            value = self._serialize(record)
         except (ValueError, TypeError) as exc:
             # fastavro raises these when a record doesn't fit the schema.
-            self._dead_letter(raw, "serialization_error", str(exc), received_at)
+            self._dead_letter(json.dumps(record), "serialization_error", str(exc), received_at)
             return
 
         self._produce(
@@ -192,6 +215,10 @@ async def stream_trades(settings: ProducerSettings, router: TradeRouter) -> None
         try:
             async with websockets.connect(settings.market_ws_url, open_timeout=10) as ws:
                 logger.info("Connected to %s", settings.market_ws_url)
+                # Subscriptions are per connection, so they're re-sent after every reconnect.
+                for subscribe in subscribe_messages(settings.product_ids):
+                    await ws.send(subscribe)
+                logger.info("Subscribed to market_trades for %s", ", ".join(settings.product_ids))
                 async for message in ws:
                     router.handle(message)
                     if backoff.attempt:
@@ -214,8 +241,9 @@ async def log_stats(router: TradeRouter, interval_seconds: float) -> None:
         rate = (stats.delivered - previous_delivered) / interval_seconds
         previous_delivered = stats.delivered
         logger.info(
-            "stats received=%d delivered=%d failed=%d dlq=%d rate=%.1f msg/s",
-            stats.received,
+            "stats messages=%d trades=%d delivered=%d failed=%d dlq=%d rate=%.1f delivered/s",
+            stats.messages,
+            stats.trades,
             stats.delivered,
             stats.delivery_failed,
             stats.dead_lettered,
@@ -230,7 +258,7 @@ async def run(settings: ProducerSettings, router: TradeRouter) -> None:
 
 
 def main() -> None:
-    settings = ProducerSettings()  # type: ignore[call-arg]  # required fields come from env
+    settings = ProducerSettings()
     logging.basicConfig(
         level=settings.log_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
