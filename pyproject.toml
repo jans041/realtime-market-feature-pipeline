@@ -7,6 +7,7 @@ dependencies = [
     "confluent-kafka[avro,schemaregistry]>=2.6",
     "websockets>=13.0",
     "pydantic>=2.9",
+    "pydantic-settings>=2.6",
     "python-dotenv>=1.0",
 ]
 
