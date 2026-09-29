@@ -235,6 +235,7 @@ def main() -> None:
         level=settings.log_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # Schema Registry client request logs
 
     producer = build_producer(settings)
     router = TradeRouter(producer, build_trade_serializer(settings), settings)
