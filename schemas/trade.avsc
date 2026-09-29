@@ -4,12 +4,12 @@
   "namespace": "market",
   "doc": "A single executed trade from an exchange WebSocket feed. Value schema for topic market.trades.raw.",
   "fields": [
-    {"name": "exchange", "type": "string", "doc": "Source exchange identifier, e.g. binance_us."},
-    {"name": "symbol", "type": "string", "doc": "Upper-case trading pair, e.g. BTCUSDT. Also used as the Kafka message key."},
+    {"name": "exchange", "type": "string", "doc": "Source exchange identifier, e.g. coinbase."},
+    {"name": "symbol", "type": "string", "doc": "Upper-case trading pair in the exchange's own notation, e.g. BTC-USD. Also used as the Kafka message key."},
     {"name": "trade_id", "type": "long", "doc": "Exchange-assigned trade id, unique per symbol."},
     {"name": "price", "type": "double", "doc": "Execution price in quote currency."},
     {"name": "quantity", "type": "double", "doc": "Executed quantity in base currency."},
-    {"name": "is_buyer_maker", "type": "boolean", "doc": "True if the buyer was the maker, i.e. the trade was a sell-side aggression."},
+    {"name": "is_buyer_maker", "type": "boolean", "doc": "True if the buyer was the maker (resting) order, i.e. the seller was the aggressor."},
     {"name": "event_time", "type": {"type": "long", "logicalType": "timestamp-millis"}, "doc": "Trade execution time at the exchange (UTC). Event time for streaming windows."},
     {"name": "ingest_time", "type": {"type": "long", "logicalType": "timestamp-millis"}, "doc": "Time the producer received the trade (UTC)."}
   ]
