@@ -91,8 +91,8 @@ def test_validation_error_message_names_the_field() -> None:
 
 def test_avro_dict_matches_registered_schema() -> None:
     """Guards against drift between the Trade dataclass and schemas/trade.avsc."""
-    schema = fastavro.schema.load_schema(REPO_ROOT / "schemas" / "trade.avsc")
+    schema = json.loads((REPO_ROOT / "schemas" / "trade.avsc").read_text(encoding="utf-8"))
     record = parse(binance_event()).to_avro_dict()
 
-    assert fastavro.validation.validate(record, schema, strict=True)
+    assert fastavro.validation.validate(record, fastavro.parse_schema(schema), strict=True)
     assert set(record) == {field["name"] for field in schema["fields"]}
