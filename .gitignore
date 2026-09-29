@@ -1,0 +1,56 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.python-version
+
+# ---------- Testing / tooling caches ----------
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ---------- Secrets & local config (never commit) ----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.aws/
+
+# ---------- Spark ----------
+spark-warehouse/
+metastore_db/
+derby.log
+checkpoints/
+*.crc
+
+# ---------- Feast ----------
+feature_repo/data/
+feature_repo/registry.db
+feature_repo/online_store.db
+
+# ---------- Great Expectations ----------
+gx/uncommitted/
+
+# ---------- Local data & Docker volumes ----------
+data/
+*.parquet
+*.avro
+volumes/
+
+# ---------- Notebooks ----------
+.ipynb_checkpoints/
+
+# ---------- IDE / OS ----------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
