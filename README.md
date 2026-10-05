@@ -2,7 +2,7 @@
 
 Streaming market events through Kafka and PySpark Structured Streaming into a Feast feature store (Redis online, Iceberg offline), with Great Expectations data contracts and GitHub Actions CI.
 
-> Status: Phase 1 — ingestion (Coinbase WebSocket -> Kafka, Avro + Schema Registry, DLQ).
+> Status: Phase 2 — streaming features (PySpark Structured Streaming, sliding windows, watermarks).
 
 ## Repository layout
 
@@ -77,6 +77,58 @@ Design notes:
   is meaningless.
 
 Configuration is via environment variables (see `.env.example`).
+
+## Streaming: windowed features
+
+`src/pipeline/streaming/job.py` reads raw trades, computes per-symbol features over sliding
+windows, and writes them to `market.features.1m`.
+
+```bash
+docker compose up -d streaming-job        # builds the Spark image on first run
+docker compose logs -f streaming-job      # one progress line per micro-batch
+docker compose stop streaming-job
+```
+
+Spark UI while it runs: http://localhost:4040
+
+| Feature | Definition |
+|---|---|
+| `trade_count` | trades in the window |
+| `volume` | total quantity traded |
+| `vwap` | volume-weighted average price, `sum(price * qty) / sum(qty)` |
+| `price_min`, `price_max` | price range |
+| `buy_volume`, `sell_volume` | quantity where the buyer / seller was the aggressor (crossed the spread) |
+
+Each output message is keyed by symbol; the value is JSON with `symbol`, `window_start`,
+`window_end` (UTC) and the features.
+
+Design notes:
+
+- **Sliding windows:** 1 minute long, every 10 seconds, on `event_time` (exchange time), so
+  results don't depend on when trades happen to arrive.
+- **Watermark: 10 seconds.** Trades arriving more than 10 s behind the newest event time are
+  dropped. Measured exchange-to-producer lag is p99 ~234 ms, so this leaves ample headroom.
+- **Append output mode:** each window is written once, when the watermark passes its end.
+  Results are final, at the cost of ~10-20 s extra latency after the window closes.
+- **Decoding:** the producer writes Confluent-framed Avro (magic byte + 4-byte schema id +
+  payload); the job strips the 5-byte header and decodes with `schemas/trade.avsc`.
+  Undecodable records are dropped rather than failing the query.
+- **Checkpointing** in the `spark-checkpoints` Docker volume: Kafka offsets and window state
+  survive restarts. `maxOffsetsPerTrigger` caps batch size when catching up on a backlog.
+- **Known limitation:** windows that straddle the job's (or producer's) start contain only
+  partial data.
+
+Spark runs in Docker (`docker/spark/Dockerfile`, Python 3.12 + Java 17): on native Windows,
+Spark's Hadoop layer needs `winutils.exe` to load connector packages.
+
+## Running tests
+
+```bash
+pytest                                    # everything except Spark tests (they skip on Windows)
+docker compose run --rm spark pytest      # full suite, including Spark, on Linux
+```
+
+CI runs ruff, mypy and the full test suite on every pull request.
 
 ## Contributing
 
