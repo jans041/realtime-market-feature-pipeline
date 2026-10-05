@@ -1,0 +1,51 @@
+# Lint, type-check and test on every pull request and on pushes to main.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel an in-progress run when a newer commit is pushed to the same branch.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # PySpark runs on the JVM; Spark 4.x needs Java 17+.
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install
+        run: pip install -e ".[dev,spark]"
+
+      - name: Ruff lint
+        run: ruff check src tests
+
+      - name: Ruff format
+        run: ruff format --check src tests
+
+      # Runs inside the installed environment (unlike the isolated pre-commit hook),
+      # so third-party type stubs such as confluent-kafka's are checked too.
+      - name: Mypy
+        run: mypy src tests --ignore-missing-imports
+
+      - name: Pytest
+        run: pytest --cov=pipeline --cov-report=term-missing
