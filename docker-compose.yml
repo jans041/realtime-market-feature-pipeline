@@ -112,6 +112,30 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
 
+  # Streaming job: market.trades.raw -> windowed features -> market.features.1m
+  #   docker compose up -d streaming-job      logs: docker compose logs -f streaming-job
+  # Spark UI (micro-batches, state, watermark): http://localhost:4040
+  streaming-job:
+    image: rtfp-spark:local
+    build:
+      context: .
+      dockerfile: docker/spark/Dockerfile
+    profiles: ["streaming"]
+    command: ["python", "-m", "pipeline.streaming.job"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "4040:4040"
+    volumes:
+      - .:/app
+      # Checkpoint (Kafka offsets + window state) survives container restarts.
+      - spark-checkpoints:/checkpoints
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    restart: unless-stopped
+
 volumes:
   kafka-data:
   redis-data:
+  spark-checkpoints:
