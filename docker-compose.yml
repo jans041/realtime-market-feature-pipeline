@@ -195,6 +195,33 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
     restart: unless-stopped
 
+  # Feature sink: market.features.1m -> Redis (online, immediately) + Iceberg (offline, batched)
+  #   docker compose up -d feature-sink       logs: docker compose logs -f feature-sink
+  feature-sink:
+    image: rtfp-spark:local
+    build:
+      context: .
+      dockerfile: docker/spark/Dockerfile
+    profiles: ["streaming"]
+    command: ["python", "-m", "pipeline.features.sink"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      iceberg-rest:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_CONNECTION_STRING: redis:6379
+      ICEBERG_CATALOG_URI: http://iceberg-rest:8181
+      S3_ENDPOINT: http://seaweedfs:8333
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY in .env}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY in .env}
+    restart: unless-stopped
+
 volumes:
   kafka-data:
   redis-data:
