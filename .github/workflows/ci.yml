@@ -34,13 +34,13 @@ jobs:
           java-version: "17"
 
       - name: Install
-        run: pip install -e ".[dev,spark]"
+        run: pip install -e ".[dev,spark,feast]"
 
       - name: Ruff lint
-        run: ruff check src tests
+        run: ruff check src tests feature_repo
 
       - name: Ruff format
-        run: ruff format --check src tests
+        run: ruff format --check src tests feature_repo
 
       # Runs inside the installed environment (unlike the isolated pre-commit hook),
       # so third-party type stubs such as confluent-kafka's are checked too.
@@ -49,3 +49,11 @@ jobs:
 
       - name: Pytest
         run: pytest --cov=pipeline --cov-report=term-missing
+
+      # Validates the Feast definitions and shows what `feast apply` would change.
+      # Source validation needs a live Iceberg catalog, so it's skipped in CI; the
+      # registry is created fresh, so this checks the definitions from scratch.
+      - name: Feast plan
+        env:
+          REDIS_CONNECTION_STRING: localhost:6379
+        run: feast -c feature_repo plan --skip-source-validation
