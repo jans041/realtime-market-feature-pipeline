@@ -13,6 +13,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "pytest-cov>=5.0", "ruff>=0.8", "mypy>=1.13", "pre-commit>=4.0"]
+# Streaming job and its tests. Large (~400 MB) and needs Java 17+, so kept out of the base install.
+spark = ["pyspark~=4.2.0"]
 
 [tool.ruff]
 line-length = 100
