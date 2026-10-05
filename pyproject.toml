@@ -12,11 +12,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3", "pytest-cov>=5.0", "ruff>=0.8", "mypy>=1.13", "pre-commit>=4.0"]
+dev = ["pytest>=8.3", "pytest-cov>=5.0", "ruff>=0.8", "mypy>=1.13", "pre-commit>=4.0",
+       # Local SQLite-backed Iceberg catalog for tests that write real tables.
+       "pyiceberg[sql-sqlite]>=0.9"]
 # Streaming job and its tests. Large (~400 MB) and needs Java 17+, so kept out of the base install.
 spark = ["pyspark~=4.2.0"]
 # Feature store: Redis online store, DuckDB offline engine, Iceberg tables via pyiceberg.
-feast = ["feast[redis,duckdb,iceberg]~=0.66.0", "pyiceberg[pyarrow,s3fs]>=0.9"]
+feast = ["feast[redis,duckdb,iceberg]~=0.66.0", "pyiceberg[pyarrow,s3fs,pyiceberg-core]>=0.9"]
 
 [tool.ruff]
 line-length = 100
