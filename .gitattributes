@@ -1,0 +1,3 @@
+# Use LF line endings everywhere, including Windows checkouts. Files like the Dockerfile
+# run inside Linux containers, where CRLF can break shell line continuations.
+* text=auto eol=lf
