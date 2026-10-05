@@ -27,6 +27,7 @@ class FeatureStoreSettings(BaseSettings):
     s3_secret_key: SecretStr  # SecretStr keeps the value out of logs and reprs
     aws_region: str = "us-east-1"
 
+    redis_connection_string: str = "localhost:6379"
     feature_repo_path: Path = REPO_ROOT / "feature_repo"
 
     # Iceberg append batching: every append writes files and a snapshot, so batch rows
