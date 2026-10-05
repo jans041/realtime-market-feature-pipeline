@@ -1,0 +1,17 @@
+# Keep secrets, local environments and data out of the build context and image.
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+.git/
+.claude/
+**/__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+data/
+checkpoints/
+spark-warehouse/
