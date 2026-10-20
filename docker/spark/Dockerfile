@@ -1,4 +1,4 @@
-# Linux runtime for everything Spark: unit tests and the streaming job.
+# Linux runtime for the pipeline's services: Spark job, feature sink, and the full test suite.
 # Spark's Hadoop layer needs native winutils.exe on Windows; running it here avoids that
 # and matches the Linux CI environment.
 #
@@ -16,7 +16,7 @@ WORKDIR /app
 # Dependencies first, so this layer is cached until pyproject.toml changes.
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --no-cache-dir ".[dev,spark]"
+RUN pip install --no-cache-dir ".[dev,spark,feast]"
 
 # Download the Kafka and Avro connector jars at build time, so runs need no network
 # and always use the same jars.

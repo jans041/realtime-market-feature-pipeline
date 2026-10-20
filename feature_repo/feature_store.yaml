@@ -1,0 +1,12 @@
+# Feast feature store: Redis online store, DuckDB offline engine over Iceberg.
+# ${VARS} are expanded from the environment; Python entry points load .env first.
+# CLI on Windows:  $env:REDIS_CONNECTION_STRING="localhost:6379"; feast -c feature_repo plan
+project: market_features
+provider: local
+registry: data/registry.db
+online_store:
+  type: redis
+  connection_string: ${REDIS_CONNECTION_STRING}
+offline_store:
+  type: duckdb
+entity_key_serialization_version: 3

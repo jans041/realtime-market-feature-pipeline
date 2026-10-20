@@ -98,6 +98,66 @@ services:
       KAFKA_SCHEMAREGISTRY_ENABLED: "true"
       KAFKA_SCHEMAREGISTRY_URLS: http://schema-registry:8081
 
+  # S3-compatible object storage for the Iceberg offline store (MinIO's free images were
+  # discontinued). S3 API: http://localhost:8333. Credentials come from .env.
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.48
+    container_name: seaweedfs
+    # -ip: address advertised to other services; -ip.bind: listen on all interfaces
+    command: ["server", "-dir=/data", "-ip=seaweedfs", "-ip.bind=0.0.0.0",
+              "-s3", "-s3.port=8333", "-master.volumeSizeLimitMB=256"]
+    ports:
+      - "8333:8333"
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY in .env}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY in .env}
+    volumes:
+      - seaweedfs-data:/data
+    healthcheck:
+      <<: *hc
+      test: ["CMD-SHELL", "wget -qO /dev/null http://localhost:9333/cluster/status"]
+
+  # One-shot job: creates the "warehouse" bucket if it doesn't exist, then exits
+  s3-init:
+    image: chrislusf/seaweedfs:4.48
+    container_name: s3-init
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if echo "s3.bucket.list" | weed shell -master=seaweedfs:9333 | grep -qw warehouse; then
+          echo "bucket warehouse already exists"
+        else
+          echo "s3.bucket.create -name warehouse" | weed shell -master=seaweedfs:9333
+        fi
+    restart: "no"
+
+  # Iceberg REST catalog: tracks where each table's current metadata lives.
+  # Apache's reference implementation, fine for local dev; production would use
+  # Polaris, Glue, Lakekeeper or similar. Catalog state persists in the volume.
+  iceberg-rest:
+    image: apache/iceberg-rest-fixture:1.10.1
+    container_name: iceberg-rest
+    depends_on:
+      s3-init:
+        condition: service_completed_successfully
+    ports:
+      - "8181:8181"
+    environment:
+      CATALOG_URI: jdbc:sqlite:/home/iceberg/iceberg_catalog.db
+      CATALOG_WAREHOUSE: s3://warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://seaweedfs:8333
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY in .env}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY in .env}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+    volumes:
+      # Mounted over the image user's home so the volume is owned by that user (uid 1000).
+      - iceberg-catalog:/home/iceberg
+
   # Spark runtime (Linux + Java 17). Not started by `docker compose up`; used on demand:
   #   docker compose run --rm spark pytest
   spark:
@@ -135,7 +195,36 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
     restart: unless-stopped
 
+  # Feature sink: market.features.1m -> Redis (online, immediately) + Iceberg (offline, batched)
+  #   docker compose up -d feature-sink       logs: docker compose logs -f feature-sink
+  feature-sink:
+    image: rtfp-spark:local
+    build:
+      context: .
+      dockerfile: docker/spark/Dockerfile
+    profiles: ["streaming"]
+    command: ["python", "-m", "pipeline.features.sink"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      iceberg-rest:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_CONNECTION_STRING: redis:6379
+      ICEBERG_CATALOG_URI: http://iceberg-rest:8181
+      S3_ENDPOINT: http://seaweedfs:8333
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY in .env}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY in .env}
+    restart: unless-stopped
+
 volumes:
   kafka-data:
   redis-data:
   spark-checkpoints:
+  seaweedfs-data:
+  iceberg-catalog:
