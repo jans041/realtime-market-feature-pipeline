@@ -17,9 +17,12 @@ if TYPE_CHECKING:
 pytest.importorskip("pyspark")
 
 from pipeline.streaming.decode import (  # noqa: E402
+    ERROR_NOT_FRAMED,
+    ERROR_UNDECODABLE,
     HEADER_LENGTH,
     decode_trades,
     load_avro_schema,
+    undecodable_trades,
 )
 
 SCHEMA_PATH = REPO_ROOT / "schemas" / "trade.avsc"
@@ -45,15 +48,15 @@ def confluent_frame(record: dict[str, Any], schema_id: int = SCHEMA_ID) -> bytes
     return b"\x00" + struct.pack(">I", schema_id) + buffer.getvalue()
 
 
-def kafka_rows(spark: SparkSession, *values: bytes) -> DataFrame:
-    """Mimic the Kafka source's columns that decode_trades uses."""
+def kafka_rows(spark: SparkSession, *values: bytes | None) -> DataFrame:
+    """Mimic the Kafka source's columns that the decode functions use."""
     return spark.createDataFrame(
-        [(value, 3, offset) for offset, value in enumerate(values)],
-        "value binary, partition int, offset long",
+        [(b"BTC-USD", value, 3, offset) for offset, value in enumerate(values)],
+        "key binary, value binary, partition int, offset long",
     )
 
 
-def decode(spark: SparkSession, *values: bytes) -> list[dict[str, Any]]:
+def decode(spark: SparkSession, *values: bytes | None) -> list[dict[str, Any]]:
     df = decode_trades(kafka_rows(spark, *values), load_avro_schema(SCHEMA_PATH))
     return [row.asDict() for row in df.collect()]
 
@@ -84,15 +87,38 @@ def test_schema_id_is_read_from_header(spark: SparkSession) -> None:
     assert row["schema_id"] == 70_000
 
 
-def test_bad_records_are_dropped_not_fatal(spark: SparkSession) -> None:
+def good_and_bad() -> tuple[bytes | None, ...]:
     good = confluent_frame(TRADE)
-    rows = decode(
-        spark,
+    return (
         good,
         b"\x01" + good[1:],  # wrong magic byte
         good[:HEADER_LENGTH],  # header only, no payload
         good[:12],  # truncated payload
         b'{"symbol":"BTC-USD"}',  # plain JSON, not Confluent-framed
+        None,  # tombstone
     )
 
+
+def test_bad_records_are_dropped_not_fatal(spark: SparkSession) -> None:
+    rows = decode(spark, *good_and_bad())
+
     assert [r["kafka_offset"] for r in rows] == [0]
+
+
+def test_bad_records_are_returned_for_the_dlq_with_a_reason(spark: SparkSession) -> None:
+    values = good_and_bad()
+    df = undecodable_trades(kafka_rows(spark, *values), load_avro_schema(SCHEMA_PATH))
+
+    rows = sorted(df.collect(), key=lambda r: r["kafka_offset"])
+
+    assert [(r["kafka_offset"], r["error_type"]) for r in rows] == [
+        (1, ERROR_NOT_FRAMED),
+        (2, ERROR_NOT_FRAMED),
+        (3, ERROR_UNDECODABLE),
+        (4, ERROR_NOT_FRAMED),
+        (5, ERROR_NOT_FRAMED),
+    ]
+    # Original key and bytes are kept untouched, so the record can be inspected or replayed.
+    assert [r["value"] for r in rows] == list(values[1:])
+    assert {r["key"] for r in rows} == {b"BTC-USD"}
+    assert all(r["error_message"] for r in rows)
