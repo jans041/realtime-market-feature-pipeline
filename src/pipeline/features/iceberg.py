@@ -81,9 +81,14 @@ def register_feast_catalog_config(settings: FeatureStoreSettings) -> None:
     Uses PyIceberg's internal ``_ENV_CONFIG``; test_iceberg_table.py fails if that changes.
     """
     from pyiceberg import catalog as pyiceberg_catalog
+    from pyiceberg.typedef import RecursiveDict
 
-    s3_settings = {k: v for k, v in catalog_properties(settings).items() if k.startswith("s3.")}
+    s3_settings: RecursiveDict = {
+        k: v for k, v in catalog_properties(settings).items() if k.startswith("s3.")
+    }
     catalogs = pyiceberg_catalog._ENV_CONFIG.config.setdefault("catalog", {})
+    if not isinstance(catalogs, dict):
+        raise TypeError(f"unexpected PyIceberg catalog config: {type(catalogs).__name__}")
     catalogs[FEAST_CATALOG_NAME] = s3_settings
 
 

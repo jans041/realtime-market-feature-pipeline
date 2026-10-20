@@ -65,6 +65,7 @@ def test_feast_catalog_gets_s3_settings_via_public_load_catalog(
     from pyiceberg import catalog as pyiceberg_catalog
 
     catalogs = pyiceberg_catalog._ENV_CONFIG.config.setdefault("catalog", {})
+    assert isinstance(catalogs, dict)
     monkeypatch.setitem(catalogs, FEAST_CATALOG_NAME, {})  # restored after the test
 
     register_feast_catalog_config(settings)
