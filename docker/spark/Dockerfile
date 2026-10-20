@@ -16,7 +16,7 @@ WORKDIR /app
 # Dependencies first, so this layer is cached until pyproject.toml changes.
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --no-cache-dir ".[dev,spark,feast]"
+RUN pip install --no-cache-dir ".[dev,spark,feast,quality]"
 
 # Download the Kafka and Avro connector jars at build time, so runs need no network
 # and always use the same jars.

@@ -16,6 +16,7 @@ import sys
 
 from confluent_kafka.schema_registry import Schema, SchemaRegistryClient, SchemaRegistryError
 
+from pipeline.governance.schema_compat import COMPATIBILITY_LEVEL
 from pipeline.ingestion.config import ProducerSettings
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,10 @@ def register(settings: ProducerSettings) -> int:
     client = SchemaRegistryClient({"url": settings.schema_registry_url})
     subject = settings.trade_value_subject
     schema = Schema(settings.trade_schema_path.read_text(encoding="utf-8"), "AVRO")
+
+    # Pin the level on the subject instead of relying on the registry's global default,
+    # which differs between environments. Works before the subject's first version exists.
+    client.set_compatibility(subject, COMPATIBILITY_LEVEL)
 
     try:
         compatible = client.test_compatibility(subject, schema)
