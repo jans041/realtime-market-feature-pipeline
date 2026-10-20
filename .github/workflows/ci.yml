@@ -34,7 +34,7 @@ jobs:
           java-version: "17"
 
       - name: Install
-        run: pip install -e ".[dev,spark,feast]"
+        run: pip install -e ".[dev,spark,feast,quality]"
 
       - name: Ruff lint
         run: ruff check src tests feature_repo
