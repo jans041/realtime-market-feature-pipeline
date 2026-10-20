@@ -91,8 +91,10 @@ def _entities(*timestamps: str) -> pd.DataFrame:
 def test_plain_feast_join_leaks_rows_not_yet_written(store: FeatureStore) -> None:
     """Shows the leak is real: filtering on window_end alone, a query at 12:01:35 sees
     the 12:01:10 window, which wasn't written until 12:01:41."""
-    df = store.get_historical_features(entity_df=_entities("2026-10-05T12:01:35Z"), features=FEATURES)
-    assert df.to_df()["trade_count"].tolist() == [2]
+    job = store.get_historical_features(
+        entity_df=_entities("2026-10-05T12:01:35Z"), features=FEATURES
+    )
+    assert job.to_df()["trade_count"].tolist() == [2]
 
 
 def test_historical_features_only_returns_rows_already_written(store: FeatureStore) -> None:
