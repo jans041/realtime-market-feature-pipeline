@@ -9,7 +9,6 @@ Create it once (idempotent):  python -m pipeline.features.iceberg
 from __future__ import annotations
 
 import logging
-import os
 
 from pyiceberg.catalog import Catalog, load_catalog
 from pyiceberg.partitioning import PartitionField, PartitionSpec
@@ -69,19 +68,23 @@ def open_catalog(settings: FeatureStoreSettings) -> Catalog:
     return load_catalog("rtfp", **catalog_properties(settings))
 
 
-def export_feast_catalog_env(settings: FeatureStoreSettings) -> None:
-    """Make S3 settings visible to Feast's Iceberg reader.
+def register_feast_catalog_config(settings: FeatureStoreSettings) -> None:
+    """Give Feast's Iceberg reader our S3 settings.
 
-    Feast's DuckDB offline store opens a REST catalog with only ``uri`` and ``warehouse``
-    and ignores other catalog properties. PyIceberg also reads catalog config from
-    ``PYICEBERG_CATALOG__<NAME>__<KEY>`` environment variables, so the S3 settings are
-    supplied that way.
+    Feast's DuckDB offline store opens the REST catalog with only ``uri`` and ``warehouse``,
+    so without this its S3 client falls back to real AWS. PyIceberg merges per-catalog
+    config (normally from ``.pyiceberg.yaml`` / ``PYICEBERG_*`` env vars) into every
+    ``load_catalog(name)`` call, so we register the S3 settings there under Feast's catalog
+    name. The env-var route doesn't work: PyIceberg reads env vars only once at import and
+    turns ``_`` into ``-`` in catalog names, so ``feast_iceberg`` could never match.
+
+    Uses PyIceberg's internal ``_ENV_CONFIG``; test_iceberg_table.py fails if that changes.
     """
-    prefix = f"PYICEBERG_CATALOG__{FEAST_CATALOG_NAME.upper()}__"
-    for key, value in catalog_properties(settings).items():
-        if key.startswith("s3."):
-            env_key = key.upper().replace(".", "__").replace("-", "_")
-            os.environ[prefix + env_key] = value
+    from pyiceberg import catalog as pyiceberg_catalog
+
+    s3_settings = {k: v for k, v in catalog_properties(settings).items() if k.startswith("s3.")}
+    catalogs = pyiceberg_catalog._ENV_CONFIG.config.setdefault("catalog", {})
+    catalogs[FEAST_CATALOG_NAME] = s3_settings
 
 
 def ensure_table(catalog: Catalog, settings: FeatureStoreSettings) -> Table:

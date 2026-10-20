@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os
+from pathlib import Path
 
 import pytest
 from pydantic import SecretStr
@@ -11,7 +11,7 @@ from pipeline.features.iceberg import (
     PARTITION_SPEC,
     TABLE_SCHEMA,
     catalog_properties,
-    export_feast_catalog_env,
+    register_feast_catalog_config,
 )
 
 
@@ -53,20 +53,28 @@ def test_catalog_properties_include_s3_client_settings(settings: FeatureStoreSet
     assert props["s3.secret-access-key"] == "hunter2-do-not-log"
 
 
-def test_feast_catalog_env_exports_only_s3_settings(
-    settings: FeatureStoreSettings, monkeypatch: pytest.MonkeyPatch
+def test_feast_catalog_gets_s3_settings_via_public_load_catalog(
+    settings: FeatureStoreSettings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    prefix = f"PYICEBERG_CATALOG__{FEAST_CATALOG_NAME.upper()}__"
-    # setenv first so monkeypatch restores the original environment after the test.
-    for key in ("S3__ENDPOINT", "S3__ACCESS_KEY_ID", "S3__SECRET_ACCESS_KEY", "S3__REGION"):
-        monkeypatch.setenv(prefix + key, "placeholder")
+    """Feast opens its catalog with only uri/warehouse; our S3 settings must be merged in.
 
-    export_feast_catalog_env(settings)
+    Without them Feast's S3 client silently falls back to real AWS. Opening the catalog by
+    name through PyIceberg's public load_catalog (a local SQLite catalog, so no network)
+    proves the merge happens, and fails if PyIceberg's internal config object changes.
+    """
+    from pyiceberg import catalog as pyiceberg_catalog
 
-    assert os.environ[prefix + "S3__ENDPOINT"] == "http://storage:8333"
-    assert os.environ[prefix + "S3__ACCESS_KEY_ID"] == "key"
-    assert os.environ[prefix + "S3__SECRET_ACCESS_KEY"] == "hunter2-do-not-log"
-    assert prefix + "URI" not in os.environ
+    catalogs = pyiceberg_catalog._ENV_CONFIG.config.setdefault("catalog", {})
+    monkeypatch.setitem(catalogs, FEAST_CATALOG_NAME, {})  # restored after the test
+
+    register_feast_catalog_config(settings)
+    catalog = pyiceberg_catalog.load_catalog(
+        FEAST_CATALOG_NAME, type="sql", uri=f"sqlite:///{(tmp_path / 'c.db').as_posix()}"
+    )
+
+    assert catalog.properties["s3.endpoint"] == "http://storage:8333"
+    assert catalog.properties["s3.access-key-id"] == "key"
+    assert catalog.properties["s3.secret-access-key"] == "hunter2-do-not-log"
 
 
 def test_secret_is_hidden_in_repr(settings: FeatureStoreSettings) -> None:

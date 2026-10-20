@@ -16,14 +16,14 @@ import sys
 from feast import FeatureStore
 
 from pipeline.features.config import FeatureStoreSettings
-from pipeline.features.iceberg import export_feast_catalog_env
+from pipeline.features.iceberg import register_feast_catalog_config
 
 
 def export_feast_env(settings: FeatureStoreSettings) -> None:
     os.environ["REDIS_CONNECTION_STRING"] = settings.redis_connection_string
     os.environ["ICEBERG_CATALOG_URI"] = settings.iceberg_catalog_uri
     os.environ["ICEBERG_WAREHOUSE"] = settings.iceberg_warehouse
-    export_feast_catalog_env(settings)
+    register_feast_catalog_config(settings)
 
 
 def get_store(settings: FeatureStoreSettings) -> FeatureStore:
