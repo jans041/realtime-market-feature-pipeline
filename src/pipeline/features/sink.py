@@ -1,9 +1,15 @@
 """Feature sink: market.features.1m -> Redis (online, immediately) + Iceberg (offline, batched).
 
+Every batch is checked twice before it reaches either store: pydantic validates each
+message's structure, then a Great Expectations suite checks the invariants that relate
+fields to each other (see governance/feature_checks.py). Rejected messages go to
+market.features.dlq with the reason.
+
 Delivery is at-least-once: Kafka offsets are committed only after rows are durably
-appended to Iceberg. After a crash, uncommitted messages are re-read, so a window can be
-written to Iceberg twice; Feast resolves duplicates with ``ingested_at`` (latest wins), and
-the Redis online store ignores writes older than the value it already holds.
+appended to Iceberg and dead letters are confirmed delivered. After a crash, uncommitted
+messages are re-read, so a window can be written to Iceberg twice; Feast resolves
+duplicates with ``ingested_at`` (latest wins), and the Redis online store ignores writes
+older than the value it already holds.
 
 Run:  python -m pipeline.features.sink      (or: docker compose up -d feature-sink)
 """
@@ -26,12 +32,20 @@ from feast.data_source import PushMode
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
 
 from pipeline.features.config import FeatureStoreSettings
+from pipeline.features.dead_letters import (
+    DeadLetters,
+    KafkaDeadLetters,
+    build_dead_letter_producer,
+)
 from pipeline.features.iceberg import TABLE_SCHEMA, ensure_table, open_catalog
 from pipeline.features.store import get_store
+from pipeline.governance.feature_checks import FeatureValidator
 
 logger = logging.getLogger(__name__)
 
 PUSH_SOURCE = "trade_features_1m_push"
+ERROR_INVALID_MESSAGE = "invalid_feature_message"
+ERROR_EXPECTATION_FAILED = "feature_expectation_failed"
 ARROW_SCHEMA = TABLE_SCHEMA.as_arrow()
 
 PositiveFinite = Annotated[float, Field(gt=0, allow_inf_nan=False)]
@@ -110,7 +124,8 @@ class AppendBuffer:
 @dataclass
 class SinkStats:
     received: int = 0
-    invalid: int = 0
+    invalid: int = 0  # failed parsing/pydantic
+    rejected: int = 0  # parsed, but broke a data quality rule
     pushed_online: int = 0
     appended_offline: int = 0
 
@@ -122,11 +137,16 @@ class FeatureSink:
         store: FeatureStore,
         append: Callable[[pa.Table], None],
         buffer: AppendBuffer,
+        dead_letters: DeadLetters,
+        validate: Callable[[pd.DataFrame], dict[int, list[str]]],
     ) -> None:
+        """``validate`` maps row positions in a batch to the rules each row broke."""
         self._consumer = consumer
         self._store = store
         self._append = append
         self._buffer = buffer
+        self._dead_letters = dead_letters
+        self._validate = validate
         self.stats = SinkStats()
 
     def poll(self, max_messages: int = 500, timeout: float = 1.0) -> None:
@@ -139,7 +159,7 @@ class FeatureSink:
         self._consumer.close()
 
     def process(self, messages: list[Message]) -> None:
-        rows: list[FeatureRow] = []
+        parsed: list[tuple[Message, FeatureRow]] = []
         for message in messages:
             error = message.error()
             if error is not None:
@@ -148,22 +168,54 @@ class FeatureSink:
                 continue
             self.stats.received += 1
             try:
-                rows.append(parse_feature_message(message.value() or b""))
+                parsed.append((message, parse_feature_message(message.value() or b"")))
             except (ValueError, ValidationError) as exc:
                 self.stats.invalid += 1
                 logger.warning(
-                    "Skipping invalid feature message at offset %s: %s", message.offset(), exc
+                    "Dead-lettering invalid feature message at offset %s: %s",
+                    message.offset(),
+                    exc,
                 )
+                self._dead_letters.send(message, ERROR_INVALID_MESSAGE, str(exc))
 
-        if rows:
-            records = to_records(rows, ingested_at=datetime.now(UTC))
-            # Online first: serving should see new features within seconds.
-            self._store.push(PUSH_SOURCE, to_push_frame(records), to=PushMode.ONLINE)
-            self.stats.pushed_online += len(records)
-            self._buffer.add(records)
+        if parsed:
+            self._store_valid(parsed)
 
         if self._buffer.should_flush():
             self.flush()
+
+    def _store_valid(self, parsed: list[tuple[Message, FeatureRow]]) -> None:
+        records = to_records([row for _, row in parsed], ingested_at=datetime.now(UTC))
+        frame = to_push_frame(records)
+        # Validate before either store sees the batch: bad features are never served.
+        failures = self._validate(frame)
+        if failures:
+            self._reject(parsed, failures)
+            keep = [i for i in range(len(records)) if i not in failures]
+            records = [records[i] for i in keep]
+            frame = frame.iloc[keep].reset_index(drop=True)
+        if not records:
+            return
+        # Online first: serving should see new features within seconds.
+        self._store.push(PUSH_SOURCE, frame, to=PushMode.ONLINE)
+        self.stats.pushed_online += len(records)
+        self._buffer.add(records)
+
+    def _reject(
+        self, parsed: list[tuple[Message, FeatureRow]], failures: dict[int, list[str]]
+    ) -> None:
+        for position, rules in sorted(failures.items()):
+            self._dead_letters.send(
+                parsed[position][0], ERROR_EXPECTATION_FAILED, "failed rules: " + ", ".join(rules)
+            )
+        self.stats.rejected += len(failures)
+        broken = sorted({rule for rules in failures.values() for rule in rules})
+        logger.warning(
+            "Dead-lettered %d of %d feature rows; rules broken: %s",
+            len(failures),
+            len(parsed),
+            ", ".join(broken),
+        )
 
     def flush(self) -> None:
         records = self._buffer.drain()
@@ -177,6 +229,9 @@ class FeatureSink:
             self._buffer.add(records)
             logger.exception("Iceberg append of %d rows failed; will retry", len(records))
             return
+        # Raises DeadLetterError if any dead letter is undelivered. Deliberately not caught:
+        # committing now would lose it, and a restart makes Kafka redeliver the batch.
+        self._dead_letters.flush()
         self._consumer.commit(asynchronous=False)
         self.stats.appended_offline += len(records)
         newest = max(r["window_end"] for r in records)
@@ -216,11 +271,18 @@ def main() -> None:
         store=get_store(settings),
         append=table.append,
         buffer=AppendBuffer(settings.flush_max_rows, settings.flush_interval_seconds),
+        dead_letters=KafkaDeadLetters(
+            build_dead_letter_producer(settings.kafka_bootstrap_servers),
+            settings.kafka_topic_features_dlq,
+        ),
+        validate=FeatureValidator().failures,
     )
     logger.info(
-        "Feature sink running: %s -> Redis + Iceberg %s (flush every %.0f s or %d rows)",
+        "Feature sink running: %s -> Redis + Iceberg %s, rejects -> %s "
+        "(flush every %.0f s or %d rows)",
         settings.kafka_topic_features,
         settings.table_identifier,
+        settings.kafka_topic_features_dlq,
         settings.flush_interval_seconds,
         settings.flush_max_rows,
     )

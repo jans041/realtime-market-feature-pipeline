@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
+import pandas as pd
 import pyarrow as pa
 import pytest
 
 pytest.importorskip("feast")
 
+from pipeline.features.dead_letters import DeadLetterError  # noqa: E402
 from pipeline.features.iceberg import TABLE_SCHEMA  # noqa: E402
 from pipeline.features.sink import (  # noqa: E402
+    ERROR_EXPECTATION_FAILED,
+    ERROR_INVALID_MESSAGE,
     PUSH_SOURCE,
     AppendBuffer,
     FeatureSink,
@@ -52,6 +57,15 @@ class FakeMessage:
     def value(self) -> bytes:
         return self._value
 
+    def key(self) -> bytes:
+        return b"BTC-USD"
+
+    def topic(self) -> str:
+        return "market.features.1m"
+
+    def partition(self) -> int:
+        return 2
+
     def offset(self) -> int:
         return self._offset
 
@@ -71,6 +85,21 @@ class FakeConsumer:
         self.closed = True
 
 
+class FakeDeadLetters:
+    def __init__(self, events: list[str] | None = None, fail_flush: bool = False) -> None:
+        self.sent: list[tuple[Any, str, str]] = []
+        self.events = events if events is not None else []
+        self.fail_flush = fail_flush
+
+    def send(self, message: Any, error_type: str, error_message: str) -> None:
+        self.sent.append((message, error_type, error_message))
+
+    def flush(self) -> None:
+        self.events.append("dlq_flush")
+        if self.fail_flush:
+            raise DeadLetterError("broker down")
+
+
 class FakeStore:
     def __init__(self) -> None:
         self.pushes: list[tuple[str, Any]] = []
@@ -87,12 +116,20 @@ class FakeClock:
         return self.now
 
 
-def message(**overrides: Any) -> FakeMessage:
-    return FakeMessage(json.dumps({**FEATURE_JSON, **overrides}).encode())
+def message(offset: int = 0, **overrides: Any) -> FakeMessage:
+    return FakeMessage(json.dumps({**FEATURE_JSON, **overrides}).encode(), offset=offset)
+
+
+def no_failures(frame: pd.DataFrame) -> dict[int, list[str]]:
+    return {}
 
 
 def make_sink(
-    append: Any = None, max_rows: int = 100, clock: FakeClock | None = None
+    append: Any = None,
+    max_rows: int = 100,
+    clock: FakeClock | None = None,
+    dead_letters: FakeDeadLetters | None = None,
+    validate: Callable[[pd.DataFrame], dict[int, list[str]]] = no_failures,
 ) -> tuple[FeatureSink, FakeConsumer, FakeStore, list[pa.Table]]:
     consumer, store = FakeConsumer(), FakeStore()
     appended: list[pa.Table] = []
@@ -101,6 +138,8 @@ def make_sink(
         store=store,  # type: ignore[arg-type]
         append=append or appended.append,
         buffer=AppendBuffer(max_rows=max_rows, max_age_seconds=60, clock=clock or FakeClock()),
+        dead_letters=dead_letters or FakeDeadLetters(),
+        validate=validate,
     )
     return sink, consumer, store, appended
 
@@ -219,13 +258,86 @@ def test_failed_append_keeps_rows_and_does_not_commit() -> None:
     assert len(sink._buffer.records) == 1  # retried on the next flush
 
 
-def test_invalid_messages_are_skipped_and_counted() -> None:
-    sink, _, store, _ = make_sink()
+def test_invalid_messages_are_dead_lettered_and_counted() -> None:
+    dead_letters = FakeDeadLetters()
+    sink, _, store, _ = make_sink(dead_letters=dead_letters)
+    bad_json, bad_vwap = FakeMessage(b"{not json"), message(vwap=-1.0)
 
-    sink.process([FakeMessage(b"{not json"), message(vwap=-1.0), message()])  # type: ignore[list-item]
+    sink.process([bad_json, bad_vwap, message()])  # type: ignore[list-item]
 
     assert sink.stats.received == 3
     assert sink.stats.invalid == 2
+    assert [(m, t) for m, t, _ in dead_letters.sent] == [
+        (bad_json, ERROR_INVALID_MESSAGE),
+        (bad_vwap, ERROR_INVALID_MESSAGE),
+    ]
+    [(_, frame)] = store.pushes
+    assert len(frame) == 1
+
+
+def test_rows_breaking_a_rule_reach_neither_store() -> None:
+    dead_letters = FakeDeadLetters()
+    sink, _, store, _ = make_sink(
+        max_rows=1,
+        dead_letters=dead_letters,
+        validate=lambda frame: {1: ["vwap_within_price_range", "symbol_format"]},
+    )
+    good, bad = message(), message(offset=7, symbol="ETH-USD")
+
+    sink.process([good, bad])  # type: ignore[list-item]
+
+    [(_, frame)] = store.pushes
+    assert list(frame["symbol"]) == ["BTC-USD"]
+    assert list(frame.index) == [0]  # re-indexed after dropping the bad row
+    assert sink.stats.rejected == 1
+    assert sink.stats.pushed_online == sink.stats.appended_offline == 1
+    assert dead_letters.sent == [
+        (bad, ERROR_EXPECTATION_FAILED, "failed rules: vwap_within_price_range, symbol_format")
+    ]
+
+
+def test_batch_where_every_row_breaks_a_rule_stores_nothing() -> None:
+    sink, _, store, _ = make_sink(validate=lambda frame: {0: ["symbol_format"]})
+
+    sink.process([message()])  # type: ignore[list-item]
+
+    assert store.pushes == []
+    assert sink._buffer.records == []
+
+
+def test_dead_letters_are_confirmed_before_offsets_are_committed() -> None:
+    events: list[str] = []
+    sink, consumer, _, _ = make_sink(max_rows=1, dead_letters=FakeDeadLetters(events))
+    consumer.commit = lambda asynchronous=True: events.append("commit")  # type: ignore[method-assign]
+
+    sink.process([message()])  # type: ignore[list-item]
+
+    assert events == ["dlq_flush", "commit"]
+
+
+def test_undelivered_dead_letters_stop_the_sink_without_committing() -> None:
+    """Committing would lose the dead letter; crashing lets Kafka redeliver instead."""
+    sink, consumer, _, _ = make_sink(max_rows=1, dead_letters=FakeDeadLetters(fail_flush=True))
+
+    with pytest.raises(DeadLetterError):
+        sink.process([message()])  # type: ignore[list-item]
+
+    assert consumer.commits == 0
+
+
+def test_real_suite_rejects_an_inconsistent_window() -> None:
+    pytest.importorskip("great_expectations")
+    from pipeline.governance.feature_checks import FeatureValidator
+
+    dead_letters = FakeDeadLetters()
+    sink, _, store, _ = make_sink(dead_letters=dead_letters, validate=FeatureValidator().failures)
+
+    # Passes pydantic (all positive) but the VWAP is above the window's max price.
+    sink.process([message(vwap=500.0), message()])  # type: ignore[list-item]
+
+    [(_, error_type, error_message)] = dead_letters.sent
+    assert error_type == ERROR_EXPECTATION_FAILED
+    assert "vwap_within_price_range" in error_message
     [(_, frame)] = store.pushes
     assert len(frame) == 1
 
@@ -250,3 +362,16 @@ def test_close_flushes_remaining_rows() -> None:
     assert len(appended) == 1
     assert consumer.commits == 1
     assert consumer.closed
+
+
+def test_feature_dlq_topic_is_not_taken_from_the_trade_dlq_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # All settings classes read the same .env, which sets KAFKA_TOPIC_DLQ for the producer.
+    from pipeline.features.config import FeatureStoreSettings
+
+    monkeypatch.setenv("KAFKA_TOPIC_DLQ", "market.trades.dlq")
+
+    settings = FeatureStoreSettings(s3_access_key="k", s3_secret_key="s")  # type: ignore[arg-type]
+
+    assert settings.kafka_topic_features_dlq == "market.features.dlq"

@@ -16,6 +16,9 @@ class FeatureStoreSettings(BaseSettings):
     kafka_bootstrap_servers: str = "localhost:9092"
     kafka_topic_features: str = "market.features.1m"
     kafka_consumer_group: str = "feature-sink"
+    # Not "kafka_topic_dlq": every settings class reads the same .env, where KAFKA_TOPIC_DLQ
+    # is the trade DLQ.
+    kafka_topic_features_dlq: str = "market.features.dlq"
 
     iceberg_catalog_uri: str = "http://localhost:8181"
     iceberg_warehouse: str = "s3://warehouse/"
