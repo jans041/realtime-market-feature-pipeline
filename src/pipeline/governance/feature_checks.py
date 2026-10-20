@@ -27,6 +27,7 @@ from typing import Any
 import great_expectations as gx
 import great_expectations.expectations as gxe
 import pandas as pd
+from great_expectations.core.batch_definition import BatchDefinition
 
 WINDOW_SECONDS = 60
 SYMBOL_PATTERN = r"^[A-Z0-9]+-[A-Z0-9]+$"  # BASE-QUOTE, e.g. BTC-USD
@@ -64,7 +65,7 @@ def prepare(features: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
-def _rule(name: str, expectation: gxe.Expectation) -> gxe.Expectation:
+def named_rule(name: str, expectation: gxe.Expectation) -> gxe.Expectation:
     # The rule name travels in ``meta`` so results can be reported by name.
     expectation.meta = {"rule": name}
     return expectation
@@ -73,33 +74,40 @@ def _rule(name: str, expectation: gxe.Expectation) -> gxe.Expectation:
 def invariant_expectations() -> list[gxe.Expectation]:
     """Row-level rules; each failing row is reported, so it can be dead-lettered."""
     return [
-        _rule(
+        named_rule(
             "symbol_format",
             gxe.ExpectColumnValuesToMatchRegex(column="symbol", regex=SYMBOL_PATTERN),
         ),
-        _rule(
+        named_rule(
             "window_is_one_minute",
             gxe.ExpectColumnValuesToBeInSet(column="window_seconds", value_set=[WINDOW_SECONDS]),
         ),
-        _rule(
+        named_rule(
             "price_min_not_above_max",
             gxe.ExpectColumnPairValuesAToBeGreaterThanB(
                 column_A="price_max", column_B="price_min", or_equal=True
             ),
         ),
-        _rule(
+        named_rule(
             "vwap_within_price_range",
             gxe.ExpectColumnValuesToBeBetween(
                 column="vwap_outside_range", min_value=0, max_value=RELATIVE_TOLERANCE
             ),
         ),
-        _rule(
+        named_rule(
             "buy_plus_sell_equals_volume",
             gxe.ExpectColumnValuesToBeBetween(
                 column="side_volume_mismatch", min_value=0, max_value=RELATIVE_TOLERANCE
             ),
         ),
     ]
+
+
+def new_batch_definition() -> BatchDefinition[Any]:
+    """An in-memory GX context whose batches are whole pandas DataFrames passed at run time."""
+    context = gx.get_context(mode="ephemeral")
+    asset = context.data_sources.add_pandas("features").add_dataframe_asset("batch")
+    return asset.add_batch_definition_whole_dataframe("whole_batch")
 
 
 def rule_name(result: Any) -> str:
@@ -128,9 +136,7 @@ class FeatureValidator:
     """
 
     def __init__(self) -> None:
-        context = gx.get_context(mode="ephemeral")
-        asset = context.data_sources.add_pandas("features").add_dataframe_asset("batch")
-        self._batch_definition = asset.add_batch_definition_whole_dataframe("whole_batch")
+        self._batch_definition = new_batch_definition()
         self._suite = gx.ExpectationSuite(
             name="trade_features_1m_invariants", expectations=invariant_expectations()
         )
