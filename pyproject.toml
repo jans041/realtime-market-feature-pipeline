@@ -35,3 +35,6 @@ ignore-names = ["F"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# Integration tests need live services (docker compose); run them with `pytest -m integration`.
+addopts = "-m 'not integration'"
+markers = ["integration: needs services from docker compose (e.g. Schema Registry)"]
