@@ -16,6 +16,7 @@ class StreamingSettings(BaseSettings):
     kafka_bootstrap_servers: str = "localhost:9092"
     kafka_topic_raw: str = "market.trades.raw"
     kafka_topic_features: str = "market.features.1m"
+    kafka_topic_dlq: str = "market.trades.dlq"
     trade_schema_path: Path = REPO_ROOT / "schemas" / "trade.avsc"
 
     feature_window: str = "1 minute"
@@ -30,5 +31,7 @@ class StreamingSettings(BaseSettings):
     # Caps each micro-batch so catching up on a backlog doesn't create one giant batch.
     max_offsets_per_trigger: PositiveInt = 10_000
     checkpoint_dir: str = "/checkpoints/features-1m"
+    # Separate checkpoint: the DLQ query tracks its own Kafka offsets.
+    dlq_checkpoint_dir: str = "/checkpoints/trades-dlq"
 
     log_level: str = Field(default="INFO", pattern="^(DEBUG|INFO|WARNING|ERROR)$")
